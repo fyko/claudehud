@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::fable::FableLimit;
 use common::incidents::Incident;
 
-use crate::fmt::{self, color_for_pct, BLUE, CYAN, DIM, GREEN, RED, RESET, SEP};
+use crate::fmt::{self, color_for_pct, BLUE, CYAN, DIM, GREEN, RED, RESET, SEP, YELLOW};
 use crate::input::Input;
 use crate::time::{format_countdown, format_duration};
 
@@ -67,6 +67,7 @@ pub fn render(
     // ── Context usage ──────────────────────────────────────
     out.push_str(SEP);
     push_context(input, rounding, auto_compact, &mut out);
+    push_cache(input, now_secs(), &mut out);
 
     // ── Cost (skipped when absent or $0) ───────────────────
     push_cost(input, &mut out);
@@ -267,6 +268,40 @@ fn push_context(
     out.push_str(RESET);
     out.push_str(color_for_pct(pct));
     write!(out, "{pct}%").unwrap();
+    out.push_str(RESET);
+}
+
+/// Time until the prompt cache goes cold, appended to the context segment, so
+/// you know to reply before paying to rebuild it. `cold` once it has expired.
+/// Nothing when caching was never seen (off, or the provider doesn't report it).
+///
+/// The countdown comes from `expires_at` vs the clock, not `warm` alone: between
+/// events the harness re-runs us on `refreshInterval` with the same payload, so
+/// `warm` can still say true after the TTL has run out.
+fn push_cache(input: &Input, now: u64, out: &mut String) {
+    let Some(pc) = &input.prompt_cache else {
+        return;
+    };
+    if pc.caching_observed != Some(true) {
+        return;
+    }
+    let left = pc
+        .expires_at
+        .filter(|&e| pc.warm == Some(true) && e > now)
+        .map(|e| e - now);
+    out.push(' ');
+    out.push_str(DIM);
+    out.push_str("cache ");
+    match left {
+        Some(secs) => {
+            out.push_str(RESET);
+            if secs < 60 {
+                out.push_str(YELLOW);
+            }
+            out.push_str(&format_countdown(secs));
+        }
+        None => out.push_str("cold"),
+    }
     out.push_str(RESET);
 }
 
@@ -1220,6 +1255,42 @@ mod tests {
         ));
         assert!(plain.contains("ctx 3%"), "{plain}");
         assert!(!plain.contains('✍'), "{plain}");
+    }
+
+    // ── Prompt cache countdown ────────────────────────────────────────────────
+
+    fn cache_text(prompt_cache: &str, now: u64) -> String {
+        let input: Input =
+            serde_json::from_str(&format!(r#"{{"prompt_cache": {prompt_cache}}}"#)).unwrap();
+        let mut out = String::new();
+        push_cache(&input, now, &mut out);
+        strip_ansi(&out)
+    }
+
+    #[test]
+    fn test_cache_counts_down_to_expiry() {
+        let pc = r#"{"warm": true, "caching_observed": true, "expires_at": 1000}"#;
+        assert_eq!(cache_text(pc, 1000 - 4 * 60 - 30), " cache 4m");
+        assert_eq!(cache_text(pc, 990), " cache <1m");
+    }
+
+    #[test]
+    fn test_cache_reads_cold_once_expired_or_not_warm() {
+        // Stale payload: still says warm, but the TTL has passed.
+        let stale = r#"{"warm": true, "caching_observed": true, "expires_at": 1000}"#;
+        assert_eq!(cache_text(stale, 1000), " cache cold");
+        let cold = r#"{"warm": false, "caching_observed": true, "expires_at": null}"#;
+        assert_eq!(cache_text(cold, 0), " cache cold");
+    }
+
+    #[test]
+    fn test_cache_hidden_when_caching_never_observed() {
+        let off = r#"{"warm": false, "caching_observed": false, "expires_at": null}"#;
+        assert_eq!(cache_text(off, 0), "");
+        let input: Input = serde_json::from_str(crate::input::REAL_STDIN_FIXTURE).unwrap();
+        let mut out = String::new();
+        push_cache(&input, 0, &mut out);
+        assert_eq!(out, "", "older harness without prompt_cache");
     }
 
     // ── Rotating usage slot ───────────────────────────────────────────────────
