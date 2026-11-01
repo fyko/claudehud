@@ -21,6 +21,7 @@ pub struct Input {
     pub agent: Option<Agent>,
     pub agent_type: Option<String>,
     pub worktree: Option<Worktree>,
+    pub prompt_cache: Option<PromptCache>,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +107,17 @@ pub struct RateLimits {
 pub struct RateWindow {
     pub used_percentage: Option<f64>,
     pub resets_at: Option<u64>,
+}
+
+/// Main-conversation prompt cache stats. Absent until the first API response
+/// and on Claude Code before v2.1.251. Only the fields the HUD reads.
+#[derive(Deserialize)]
+pub struct PromptCache {
+    pub warm: Option<bool>,
+    pub caching_observed: Option<bool>,
+    /// Epoch seconds when the cached prefix goes cold. `null` when the last
+    /// response reported no cache tokens.
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Deserialize)]
